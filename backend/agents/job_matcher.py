@@ -86,15 +86,16 @@ class JobMatcher:
             }
 
     @classmethod
-    def select_best_resume(cls, job_title: str, matched_skills: List[str], resumes: List[Resume]) -> Resume:
+    def select_best_resume(cls, job_title: str, matched_skills: List[str], resumes: List[Resume], job_description: str = "") -> Resume:
         """
-        Auto-selects best-fit resume version based on role tags and skills overlap.
+        Auto-selects best-fit resume version based on role tags, skills overlap, and project emphasis.
         """
         if not resumes:
             return None
 
         title_lower = job_title.lower()
         skills_str = " ".join(matched_skills).lower()
+        jd_lower = (job_description or "").lower()
 
         best_resume = resumes[0]
         best_score = -1
@@ -108,6 +109,16 @@ class JobMatcher:
             # Role tag match in matched skills
             if tag_lower in skills_str:
                 score += 5
+            # Project emphasis match in resume parsed text
+            if r.parsed_text:
+                resume_text_lower = r.parsed_text.lower()
+                for skill in matched_skills:
+                    if skill.lower() in resume_text_lower:
+                        score += 2
+                if "reviewguard" in resume_text_lower and ("fraud" in jd_lower or "ml" in jd_lower):
+                    score += 4
+                if "fastapi" in resume_text_lower and "fastapi" in jd_lower:
+                    score += 4
             # Higher version preference
             score += (r.version * 0.1)
 

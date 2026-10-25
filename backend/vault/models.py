@@ -186,3 +186,41 @@ class ActivityLog(Base):
     level = Column(String(20), default="INFO")
     message = Column(Text, nullable=False)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+
+class ConflictItem(Base):
+    """
+    Stores detected conflicts across multiple sources.
+    Users review and resolve conflicts explicitly.
+    """
+    __tablename__ = "conflict_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    field_key = Column(String(100), nullable=False) # e.g. "email", "class_xii", "eduspark_dates", "metrics_3x"
+    title = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    versions = Column(JSON, default=list) # [{"value": "...", "source": "...", "notes": "..."}]
+    resolved = Column(Boolean, default=False)
+    chosen_value = Column(Text, nullable=True)
+    chosen_source = Column(String(255), nullable=True)
+    resolved_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+class ProjectTierItem(Base):
+    """
+    Categorized project tiering with rubric analysis (depth, distinctiveness, tests, docker, authorship).
+    """
+    __tablename__ = "project_tier_items"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    project_name = Column(String(150), nullable=False, unique=True)
+    tier = Column(String(10), nullable=False) # "Tier A", "Tier B", "Tier C"
+    suggested_tier = Column(String(10), nullable=False)
+    repo_url = Column(String(500), nullable=True)
+    tech_stack = Column(JSON, default=list)
+    has_tests = Column(Boolean, default=False)
+    has_docker = Column(Boolean, default=False)
+    has_ci = Column(Boolean, default=False)
+    is_author = Column(Boolean, default=True)
+    rubric_summary = Column(Text, nullable=True)
+    user_confirmed = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)

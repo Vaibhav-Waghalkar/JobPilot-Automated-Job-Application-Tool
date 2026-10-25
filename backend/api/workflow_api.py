@@ -248,13 +248,40 @@ async def resolve_needs_you(
     return {"message": "Answer saved to verified vault. Application resumed."}
 
 @router.post("/browser/open-login")
-async def open_browser_for_login(url: Optional[str] = "https://internshala.com/login/user"):
+async def open_browser_for_login(url: Optional[str] = "https://internshala.com/login/user", platform: Optional[str] = "internshala"):
     """
-    Opens persistent browser context for the user to log in manually once.
+    Opens persistent browser context for the user to log in manually once (Internshala or Naukri).
     JobPilot never asks for or stores user passwords.
     """
-    res = await playwright_form_filler.open_manual_login_session(url)
+    target_url = url
+    if platform == "naukri":
+        target_url = "https://www.naukri.com/nlogin/login"
+    res = await playwright_form_filler.open_manual_login_session(target_url)
     return res
+
+@router.get("/naukri/profile-proposal")
+async def get_naukri_profile_proposal(db: AsyncSession = Depends(get_db)):
+    """
+    Reads verified vault facts and fixed profile, proposing before/after diff for Naukri profile updates.
+    Generated ONLY from verified vault facts.
+    """
+    from backend.adapters.naukri_adapter import NaukriAdapter
+    stmt_facts = select(VaultFact).where(VaultFact.verified == True)
+    facts = (await db.execute(stmt_facts)).scalars().all()
+
+    stmt_prof = select(FixedProfile).limit(1)
+    prof = (await db.execute(stmt_prof)).scalars().first()
+
+    mock_current_naukri = {
+        "resume_headline": "Student at MBES",
+        "profile_summary": "Looking for entry level software opportunities.",
+        "key_skills": ["Python", "C"],
+        "projects": [],
+        "education": "B.Tech CSE, 2026",
+        "resume_file": "old_resume.pdf"
+    }
+
+    return NaukriAdapter.generate_profile_update_proposal(mock_current_naukri, facts, prof)
 
 @router.put("/tracker/{application_id}/outcome")
 async def update_job_outcome(application_id: int, req: UpdateOutcomeRequest, db: AsyncSession = Depends(get_db)):

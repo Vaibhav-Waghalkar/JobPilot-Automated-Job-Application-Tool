@@ -2,6 +2,7 @@ import os
 import json
 import shutil
 from pathlib import Path
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Response
 from pydantic import BaseModel
@@ -17,6 +18,8 @@ from backend.vault.models import (
     DocumentVault,
     JobPreference,
     ImportReviewItem,
+    ConflictItem,
+    ProjectTierItem,
 )
 from backend.vault.importer import ProfileImporter, compute_hash, slugify
 from backend.vault.vector_store import (
@@ -32,6 +35,7 @@ from backend.importers.review_importer import (
     scrape_portfolio_url,
     stage_for_review,
 )
+from backend.importers.full_ingestion_service import FullDataIngestionService
 
 router = APIRouter(prefix="/api/vault", tags=["Vault"])
 
@@ -71,6 +75,13 @@ class StagedItemDecision(BaseModel):
     edited_title: Optional[str] = None
     edited_content: Optional[str] = None
     edited_section: Optional[str] = None
+
+class ConflictResolutionRequest(BaseModel):
+    chosen_value: str
+    chosen_source: Optional[str] = "User typed/selected"
+
+class ProjectTierConfirmRequest(BaseModel):
+    tier: str # "Tier A", "Tier B", "Tier C"
 
 class ScrapeRequest(BaseModel):
     url: str
@@ -456,3 +467,54 @@ async def export_biodata_pdf(db: AsyncSession = Depends(get_db)):
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=JobPilot_Biodata.pdf"}
     )
+
+# --- Full Data Ingestion & Conflicts Management ---
+
+@router.post("/full-ingestion/run")
+async def trigger_full_ingestion(db: AsyncSession = Depends(get_db)):
+    """Triggers Section A full data ingestion from inbox PDFs, portfolio, LinkedIn data, and GitHub."""
+    return await FullDataIngestionService.run_full_ingestion(db)
+
+@router.get("/conflicts")
+async def get_conflicts(db: AsyncSession = Depends(get_db)):
+    """Retrieves all conflict items for user review."""
+    stmt = select(ConflictItem).order_by(ConflictItem.resolved, ConflictItem.id)
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+@router.post("/conflicts/{conflict_id}/resolve")
+async def resolve_conflict(conflict_id: int, req: ConflictResolutionRequest, db: AsyncSession = Depends(get_db)):
+    """Resolves a conflict with user-chosen or user-typed value."""
+    stmt = select(ConflictItem).where(ConflictItem.id == conflict_id)
+    res = await db.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Conflict item not found")
+
+    item.resolved = True
+    item.chosen_value = req.chosen_value
+    item.chosen_source = req.chosen_source
+    item.resolved_at = datetime.utcnow()
+    await db.commit()
+    return {"status": "resolved", "id": conflict_id, "chosen_value": req.chosen_value}
+
+@router.get("/project-tiers")
+async def get_project_tiers(db: AsyncSession = Depends(get_db)):
+    """Retrieves all categorized project tiers with rubric details."""
+    stmt = select(ProjectTierItem).order_by(ProjectTierItem.tier, ProjectTierItem.project_name)
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+@router.post("/project-tiers/{project_id}/confirm")
+async def confirm_project_tier(project_id: int, req: ProjectTierConfirmRequest, db: AsyncSession = Depends(get_db)):
+    """User confirms or adjusts project tier."""
+    stmt = select(ProjectTierItem).where(ProjectTierItem.id == project_id)
+    res = await db.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Project item not found")
+
+    item.tier = req.tier
+    item.user_confirmed = True
+    await db.commit()
+    return {"status": "confirmed", "id": project_id, "tier": req.tier}

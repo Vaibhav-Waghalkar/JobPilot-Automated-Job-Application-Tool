@@ -14,7 +14,11 @@ STRICT ANTI-HALLUCINATION RULES:
 2. If the provided facts DO NOT contain sufficient information to answer the question, or if any claim cannot be cited directly, return EXACTLY: UNKNOWN: <brief description of missing fact>
 3. NEVER assume, extrapolate, or invent achievements, technologies, companies, dates, or numbers.
 4. Hard facts (Notice Period, CTC, Experience years, Location) must reflect only what is in the facts.
-5. Temperature is 0.2. Maintain a professional, concise, direct tone.
+5. PROJECT SELECTION RULES:
+   - Mention at most 2-3 projects per application, chosen by JD relevance, leading with Tier A projects.
+   - Do NOT repeat the same project in every answer of one application.
+   - NEVER list Tier C projects in cover letters or "tell me about yourself" answers. Use Tier C only if the JD explicitly asks for that exact technology.
+6. Temperature is 0.2. Maintain a professional, concise, direct tone.
 """
 
 VERIFIER_PROMPT = """

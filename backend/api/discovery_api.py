@@ -17,6 +17,7 @@ from backend.vault.importer import slugify, compute_hash
 from backend.vault.vector_store import upsert_vault_fact_embedding
 from backend.adapters.internshala_adapter import InternshalaAdapter
 from backend.adapters.career_pages_adapter import CareerPagesAdapter
+from backend.adapters.naukri_adapter import NaukriAdapter
 from backend.adapters.base_adapter import DiscoveredJob
 from backend.agents.hard_filters import apply_hard_filters
 from backend.agents.job_matcher import JobMatcher
@@ -162,6 +163,15 @@ async def run_job_discovery(req: DiscoveryRequest, db: AsyncSession = Depends(ge
             limit=req.limit or 10,
             job_type=req.job_type or "job"
         )
+    elif req.platform == "naukri":
+        # Load local mock search results for safe mock testing
+        from pathlib import Path
+        mock_file = Path("data/mock_naukri_search.html")
+        adapter = NaukriAdapter()
+        if mock_file.exists():
+            raw_jobs = adapter.parse_search_results(mock_file.read_text(encoding="utf-8"), limit=req.limit or 10)
+        else:
+            raw_jobs = []
     elif req.platform == "career_page" and req.career_url:
         adapter = CareerPagesAdapter()
         raw_jobs = await adapter.scrape_career_url(req.career_url)
@@ -214,7 +224,7 @@ async def run_job_discovery(req: DiscoveryRequest, db: AsyncSession = Depends(ge
 
     for job in raw_jobs:
         # Check hard filters first
-        passed, skip_reason = apply_hard_filters(job, prefs, applied_urls)
+        passed, skip_reason = apply_hard_filters(job, prefs, applied_urls, job_type=req.job_type or "job")
         if not passed:
             # Record skipped job
             app_entry = JobApplication(

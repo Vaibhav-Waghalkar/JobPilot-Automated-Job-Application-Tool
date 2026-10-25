@@ -35,6 +35,13 @@ export default function App() {
   const [isDiscovering, setIsDiscovering] = useState(false);
   const [jobsFilter, setJobsFilter] = useState('all');
 
+  // Conflicts and Project Tiers state
+  const [conflicts, setConflicts] = useState([]);
+  const [projectTiers, setProjectTiers] = useState([]);
+  const [naukriProposal, setNaukriProposal] = useState(null);
+  const [customConflictInputs, setCustomConflictInputs] = useState({});
+  const [isIngestingFull, setIsIngestingFull] = useState(false);
+
   // LLM Health state
   const [llmHealth, setLlmHealth] = useState(null);
   const [isCheckingLlm, setIsCheckingLlm] = useState(false);
@@ -56,7 +63,7 @@ export default function App() {
 
   const loadData = async () => {
     try {
-      const [sumRes, fixRes, factRes, missRes, resRes, docRes, revRes, prefRes, jobsRes] = await Promise.all([
+      const [sumRes, fixRes, factRes, missRes, resRes, docRes, revRes, prefRes, jobsRes, confRes, tiersRes] = await Promise.all([
         fetch(`${API_BASE}/summary`).then(r => r.json()),
         fetch(`${API_BASE}/fixed-profile`).then(r => r.json()),
         fetch(`${API_BASE}/facts`).then(r => r.json()),
@@ -66,6 +73,8 @@ export default function App() {
         fetch(`${API_BASE}/import/review-items`).then(r => r.json()),
         fetch(`${API_BASE}/preferences`).then(r => r.json()),
         fetch(`${DISC_BASE}/jobs`).then(r => r.json()),
+        fetch(`${API_BASE}/conflicts`).then(r => r.json()).catch(() => []),
+        fetch(`${API_BASE}/project-tiers`).then(r => r.json()).catch(() => []),
       ]);
 
       setSummary(sumRes);
@@ -77,6 +86,8 @@ export default function App() {
       setReviewItems(revRes);
       setPreferences(prefRes);
       setJobs(jobsRes);
+      setConflicts(confRes || []);
+      setProjectTiers(tiersRes || []);
     } catch (err) {
       console.error('Failed to load vault data', err);
     }
@@ -129,14 +140,71 @@ export default function App() {
     }
   };
 
-  const handleOpenBrowserLogin = async () => {
-    setStatusMsg('Launching persistent browser for manual login...');
+  const handleOpenBrowserLogin = async (platform = 'internshala') => {
+    setStatusMsg(`Launching persistent browser for ${platform} manual login...`);
     try {
-      const res = await fetch('/api/workflow/browser/open-login', { method: 'POST' });
+      const res = await fetch(`/api/workflow/browser/open-login?platform=${platform}`, { method: 'POST' });
       const data = await res.json();
       setStatusMsg(data.message);
     } catch (err) {
       setStatusMsg(`Browser login launch failed: ${err.message}`);
+    }
+  };
+
+  const handleRunFullIngestion = async () => {
+    setIsIngestingFull(true);
+    setStatusMsg('Ingesting inbox PDFs, portfolio site, LinkedIn export, and analyzing 18 GitHub repositories...');
+    try {
+      const res = await fetch(`${API_BASE}/full-ingestion/run`, { method: 'POST' });
+      const data = await res.json();
+      setStatusMsg(`Full ingestion completed: ${data.resumes_registered.length} resumes, ${data.conflicts_count} conflicts seeded, ${data.projects_analyzed} projects analyzed.`);
+      loadData();
+    } catch (err) {
+      setStatusMsg(`Ingestion failed: ${err.message}`);
+    } finally {
+      setIsIngestingFull(false);
+    }
+  };
+
+  const handleResolveConflict = async (conflictId, chosenVal, chosenSrc) => {
+    try {
+      const res = await fetch(`${API_BASE}/conflicts/${conflictId}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chosen_value: chosenVal, chosen_source: chosenSrc || 'User confirmed' })
+      });
+      const data = await res.json();
+      setStatusMsg(`Conflict resolved: ${data.chosen_value}`);
+      loadData();
+    } catch (err) {
+      setStatusMsg(`Failed to resolve conflict: ${err.message}`);
+    }
+  };
+
+  const handleConfirmProjectTier = async (projectId, tierVal) => {
+    try {
+      const res = await fetch(`${API_BASE}/project-tiers/${projectId}/confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tier: tierVal })
+      });
+      const data = await res.json();
+      setStatusMsg(`Project tier updated to ${data.tier}`);
+      loadData();
+    } catch (err) {
+      setStatusMsg(`Failed to update tier: ${err.message}`);
+    }
+  };
+
+  const handleFetchNaukriProposal = async () => {
+    setStatusMsg('Generating Naukri profile update proposal from verified facts only...');
+    try {
+      const res = await fetch('/api/workflow/naukri/profile-proposal');
+      const data = await res.json();
+      setNaukriProposal(data);
+      setStatusMsg('Naukri profile update diff generated from verified vault facts.');
+    } catch (err) {
+      setStatusMsg(`Proposal generation failed: ${err.message}`);
     }
   };
 
@@ -477,6 +545,8 @@ export default function App() {
         }}>
           {[
             { id: 'discovery', label: 'Discovery & Matching', count: jobs.length },
+            { id: 'conflicts', label: 'Conflicts Screen', count: conflicts.filter(c => !c.resolved).length, badge: conflicts.filter(c => !c.resolved).length > 0 ? `${conflicts.filter(c => !c.resolved).length} Pending` : null },
+            { id: 'project_tiers', label: 'Project Tiers', count: projectTiers.length },
             { id: 'llm_health', label: 'LLM Health', badge: llmHealth?.all_healthy ? 'OK' : (llmHealth ? 'ALERT' : null) },
             { id: 'answer_engine', label: 'Answer Engine' },
             { id: 'overview', label: 'Vault Overview', count: summary?.facts_count },
@@ -564,6 +634,7 @@ export default function App() {
                     style={{ width: '130px' }}
                   >
                     <option value="internshala">Internshala</option>
+                    <option value="naukri">Naukri.com</option>
                     <option value="career_page">Career Page</option>
                   </select>
 
@@ -598,7 +669,7 @@ export default function App() {
                     className="secondary"
                     onClick={handleTestLiveListing}
                     disabled={isTestingLive}
-                    title="Scrapes real live Internshala listings with hard filters and matching only (no applying)."
+                    title="Scrapes real live listings with hard filters and matching only (no applying)."
                     style={{ fontWeight: 600, border: '1px solid var(--accent-primary)', color: 'var(--accent-primary)' }}
                   >
                     {isTestingLive ? 'Scraping Live...' : 'Test with live listing'}
@@ -606,10 +677,18 @@ export default function App() {
 
                   <button
                     className="secondary"
-                    onClick={handleOpenBrowserLogin}
-                    title="Opens persistent browser window to log in manually once. JobPilot never asks for or stores passwords."
+                    onClick={() => handleOpenBrowserLogin('internshala')}
+                    title="Opens persistent browser window to log in to Internshala manually once."
                   >
                     Open Internshala login
+                  </button>
+
+                  <button
+                    className="secondary"
+                    onClick={() => handleOpenBrowserLogin('naukri')}
+                    title="Opens persistent browser window to log in to Naukri manually once (including OTP). Password never stored."
+                  >
+                    Open Naukri login
                   </button>
 
                   <button
@@ -621,7 +700,7 @@ export default function App() {
                   </button>
                 </div>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
-                  Note: Click "Open Internshala login" to open a browser window and log in manually. You can close it once logged in.
+                  Note: Click "Open Internshala login" or "Open Naukri login" to open a browser window and log in manually. You can close it once logged in.
                 </div>
               </div>
 
@@ -883,6 +962,242 @@ export default function App() {
                         <a href={j.apply_url} target="_blank" rel="noreferrer" style={{ textDecoration: 'none' }}>
                           <button className="secondary" style={{ fontSize: '11px', padding: '4px 8px' }}>View Job URL</button>
                         </a>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: CONFLICTS SCREEN */}
+          {activeTab === 'conflicts' && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
+                <div>
+                  <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Conflicts Screen</h2>
+                  <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    When data sources disagree, JobPilot never guesses. Review each conflicting fact across all versions, and select or type the authoritative value.
+                  </p>
+                </div>
+                <button
+                  className="secondary"
+                  onClick={handleRunFullIngestion}
+                  disabled={isIngestingFull}
+                >
+                  {isIngestingFull ? 'Ingesting Sources...' : 'Re-Run Data Ingestion'}
+                </button>
+              </div>
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {conflicts.length === 0 ? (
+                  <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)', backgroundColor: 'var(--bg-surface)', borderRadius: 'var(--radius-sm)' }}>
+                    No conflicts detected.
+                  </div>
+                ) : (
+                  conflicts.map(c => (
+                    <div key={c.id} style={{
+                      backgroundColor: 'var(--bg-surface)',
+                      border: c.resolved ? '1px solid var(--border-subtle)' : '1px solid var(--warning)',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '20px',
+                    }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <div style={{ fontWeight: 600, fontSize: '14px' }}>
+                          {c.title}
+                        </div>
+                        <span style={{
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          padding: '2px 8px',
+                          borderRadius: 'var(--radius-sm)',
+                          backgroundColor: c.resolved ? 'var(--success-soft)' : 'var(--warning-soft)',
+                          color: c.resolved ? 'var(--success)' : 'var(--warning)'
+                        }}>
+                          {c.resolved ? 'RESOLVED' : 'UNRESOLVED'}
+                        </span>
+                      </div>
+
+                      <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                        {c.description}
+                      </div>
+
+                      {/* Versions comparison */}
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '16px' }}>
+                        {(c.versions || []).map((v, vIdx) => (
+                          <div key={vIdx} style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            backgroundColor: 'var(--bg-surface-elevated)',
+                            padding: '10px 14px',
+                            borderRadius: 'var(--radius-sm)',
+                            border: '1px solid var(--border-subtle)'
+                          }}>
+                            <div>
+                              <div style={{ fontWeight: 600, fontSize: '13px' }}>{v.value}</div>
+                              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                Source: {v.source} {v.notes ? `(${v.notes})` : ''}
+                              </div>
+                            </div>
+                            {!c.resolved && (
+                              <button
+                                className="primary"
+                                style={{ fontSize: '11px', padding: '4px 10px' }}
+                                onClick={() => handleResolveConflict(c.id, v.value, v.source)}
+                              >
+                                Select This Value
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+
+                      {c.resolved ? (
+                        <div style={{
+                          fontSize: '12px',
+                          color: 'var(--success)',
+                          backgroundColor: 'var(--success-soft)',
+                          padding: '10px 14px',
+                          borderRadius: 'var(--radius-sm)',
+                        }}>
+                          <b>Chosen Value:</b> {c.chosen_value} <br />
+                          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>Authority: {c.chosen_source}</span>
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                          <input
+                            type="text"
+                            placeholder="Or type custom verified value..."
+                            value={customConflictInputs[c.id] || ''}
+                            onChange={e => setCustomConflictInputs({ ...customConflictInputs, [c.id]: e.target.value })}
+                            style={{ flex: 1, fontSize: '12px' }}
+                          />
+                          <button
+                            className="primary"
+                            style={{ fontSize: '12px' }}
+                            disabled={!customConflictInputs[c.id]}
+                            onClick={() => {
+                              handleResolveConflict(c.id, customConflictInputs[c.id], 'User typed manually');
+                              setCustomConflictInputs({ ...customConflictInputs, [c.id]: '' });
+                            }}
+                          >
+                            Save Custom Value
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* TAB: PROJECT TIERS */}
+          {activeTab === 'project_tiers' && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' }}>
+                <div>
+                  <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Project Tier Rubric & Selection</h2>
+                  <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                    Each repository is analyzed by evidence (tests, Docker, CI, author status, and dependencies). Max 2-3 projects per application. Tier C is never volunteered in cover letters.
+                  </p>
+                </div>
+                <button
+                  className="secondary"
+                  onClick={handleFetchNaukriProposal}
+                >
+                  Generate Naukri Profile Diff
+                </button>
+              </div>
+
+              {naukriProposal && (
+                <div style={{
+                  backgroundColor: 'var(--bg-surface-elevated)',
+                  border: '1px solid var(--accent-primary)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '16px',
+                  marginBottom: '24px'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <div style={{ fontWeight: 600, fontSize: '13px', color: 'var(--accent-primary)' }}>
+                      Proposed Naukri Profile Update (Generated ONLY From Verified Vault Facts)
+                    </div>
+                    <button className="secondary" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => setNaukriProposal(null)}>
+                      Close Diff
+                    </button>
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '12px' }}>
+                    {Object.entries(naukriProposal.diff || {}).map(([k, val]) => (
+                      <div key={k} style={{
+                        backgroundColor: 'var(--bg-surface)',
+                        border: '1px solid var(--border-subtle)',
+                        borderRadius: 'var(--radius-sm)',
+                        padding: '12px'
+                      }}>
+                        <div style={{ fontSize: '11px', textTransform: 'uppercase', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                          {k.replace('_', ' ')}
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--danger)', marginBottom: '4px' }}>
+                          <b>Current:</b> {Array.isArray(val.current) ? (val.current.join(', ') || 'None') : String(val.current)}
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--success)' }}>
+                          <b>Proposed:</b> {Array.isArray(val.proposed) ? val.proposed.join(', ') : String(val.proposed)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                {projectTiers.length === 0 ? (
+                  <div style={{ padding: '32px', textAlign: 'center', color: 'var(--text-muted)', backgroundColor: 'var(--bg-surface)', borderRadius: 'var(--radius-sm)' }}>
+                    No project tiers loaded yet. Run Data Ingestion to analyze GitHub repositories.
+                  </div>
+                ) : (
+                  projectTiers.map(p => (
+                    <div key={p.id} style={{
+                      backgroundColor: 'var(--bg-surface)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: 'var(--radius-sm)',
+                      padding: '16px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                          <span style={{ fontWeight: 600, fontSize: '14px' }}>{p.project_name}</span>
+                          <span style={{
+                            fontSize: '11px',
+                            fontWeight: 700,
+                            padding: '2px 8px',
+                            borderRadius: 'var(--radius-sm)',
+                            backgroundColor: p.tier === 'Tier A' ? 'rgba(59, 130, 246, 0.2)' : (p.tier === 'Tier B' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(156, 163, 175, 0.2)'),
+                            color: p.tier === 'Tier A' ? '#60a5fa' : (p.tier === 'Tier B' ? '#34d399' : '#9ca3af')
+                          }}>
+                            {p.tier}
+                          </span>
+                        </div>
+                        <div style={{ fontSize: '12px', color: 'var(--text-secondary)', marginTop: '4px' }}>
+                          {p.rubric_summary}
+                        </div>
+                        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                          Tech: {(p.tech_stack || []).join(', ')} &bull; <a href={p.repo_url} target="_blank" rel="noreferrer" style={{ color: 'var(--accent-primary)' }}>GitHub Repo</a>
+                        </div>
+                      </div>
+
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                        <select
+                          value={p.tier}
+                          onChange={e => handleConfirmProjectTier(p.id, e.target.value)}
+                          style={{ fontSize: '12px', padding: '4px 8px' }}
+                        >
+                          <option value="Tier A">Tier A (Lead)</option>
+                          <option value="Tier B">Tier B (Domain-specific)</option>
+                          <option value="Tier C">Tier C (Basic/Generic)</option>
+                        </select>
                       </div>
                     </div>
                   ))
