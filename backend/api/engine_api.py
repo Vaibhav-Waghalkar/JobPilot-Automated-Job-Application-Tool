@@ -38,6 +38,7 @@ class EngineState:
         self.current_step: Optional[str] = None
         self.stop_requested = False
         self.pause_requested = False
+        self.test_run_jobs: list = []
         self.last_run_summary: Dict[str, Any] = {}
 
 engine_state = EngineState()
@@ -107,7 +108,8 @@ async def get_engine_status(db: AsyncSession = Depends(get_db)):
             "needs_you": needs_you
         },
         "waiting_for_approval": waiting_for_approval,
-        "needs_you_questions": needs_you_questions
+        "needs_you_questions": needs_you_questions,
+        "test_run_jobs": engine_state.test_run_jobs
     }
 
 async def _run_engine_flow(req: StartEngineRequest):
@@ -125,6 +127,7 @@ async def _run_engine_flow(req: StartEngineRequest):
     engine_state.stop_requested = False
     engine_state.pause_requested = False
     engine_state.current_step = "Starting discovery..."
+    engine_state.test_run_jobs = []
 
     try:
         async with AsyncSessionLocal() as db:
@@ -182,8 +185,12 @@ async def _run_engine_flow(req: StartEngineRequest):
                     limit=effective_limit,
                     job_type=req.job_type or "job"
                 )
-            else:
-                # Fallback to mock only if platform is explicitly mock
+            elif target_platform == "naukri":
+                from backend.adapters.naukri_adapter import NaukriAdapter
+                adapter = NaukriAdapter()
+                raw_jobs = []
+            elif target_platform == "mock" and os.environ.get("JOBPILOT_TEST_MODE") == "1":
+                # Only available in isolated test database mode
                 raw_jobs = [
                     DiscoveredJob(
                         platform="mock",
@@ -196,11 +203,30 @@ async def _run_engine_flow(req: StartEngineRequest):
                         description="Looking for Python FastAPI and PostgreSQL backend engineer."
                     )
                 ]
+            else:
+                raw_jobs = []
 
             if not raw_jobs:
                 engine_state.status = "Stopped"
                 engine_state.current_step = f"No new listings found on {target_platform} matching search criteria."
                 return
+
+            # Initialize test run jobs tracking for Home result panel
+            for idx, job in enumerate(raw_jobs, 1):
+                engine_state.test_run_jobs.append({
+                    "id": idx,
+                    "company": job.company,
+                    "title": job.title,
+                    "location": job.location,
+                    "salary": job.salary_raw,
+                    "platform": job.platform,
+                    "apply_url": job.apply_url,
+                    "status": "evaluating",
+                    "score": None,
+                    "current_step": "Pending evaluation...",
+                    "skip_reason": None,
+                    "updated_at": datetime.datetime.utcnow().isoformat()
+                })
 
             # Query already applied URLs
             stmt_apps = select(JobApplication.apply_url).where(JobApplication.status == "applied")
@@ -211,7 +237,9 @@ async def _run_engine_flow(req: StartEngineRequest):
             # Evaluate each discovered job
             total_listings = len(raw_jobs)
             for idx, job in enumerate(raw_jobs, 1):
+                job_track = engine_state.test_run_jobs[idx - 1]
                 if engine_state.stop_requested:
+                    job_track["current_step"] = "Run stopped by user"
                     break
                 while engine_state.pause_requested:
                     engine_state.status = "Paused"
@@ -220,7 +248,10 @@ async def _run_engine_flow(req: StartEngineRequest):
 
                 engine_state.current_company = job.company
                 engine_state.current_job_title = job.title
-                engine_state.current_step = f"Evaluating listing {idx} of {total_listings}: {job.company} - {job.title}"
+                step_msg = f"Evaluating listing {idx} of {total_listings}: {job.company} - {job.title}"
+                engine_state.current_step = step_msg
+                job_track["current_step"] = "Checking hard filters (Role, Salary, Location, Experience)..."
+                job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
 
                 # Hard filter check
                 passed, skip_reason = apply_hard_filters(
@@ -233,6 +264,11 @@ async def _run_engine_flow(req: StartEngineRequest):
                 )
 
                 if not passed:
+                    job_track["status"] = "skipped"
+                    job_track["skip_reason"] = skip_reason
+                    job_track["current_step"] = f"Skipped: {skip_reason}"
+                    job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
+
                     app_entry = JobApplication(
                         platform=job.platform,
                         job_id_external=job.external_id,
@@ -250,7 +286,10 @@ async def _run_engine_flow(req: StartEngineRequest):
                     await db.commit()
                     continue
 
-                # Match scoring
+                # Passed hard filters -> Match scoring
+                job_track["current_step"] = "Hard filters passed. Evaluating grounded LLM match score..."
+                job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
+
                 match_result = await JobMatcher.match_job(
                     title=job.title,
                     company=job.company,
@@ -259,8 +298,20 @@ async def _run_engine_flow(req: StartEngineRequest):
                 )
                 score = match_result.get("score", 0)
                 threshold = pref.default_match_threshold if pref else 70
+                job_track["score"] = score
 
                 if score < threshold:
+                    # Provide clean plain-language reason
+                    if score == 0 and len([f for f in facts if f.section in ["skill", "project"]]) == 0:
+                        plain_skip = "No verified facts in profile (Score: 0/100)"
+                    else:
+                        plain_skip = f"Match score {score}/100 below threshold ({threshold})"
+
+                    job_track["status"] = "skipped"
+                    job_track["skip_reason"] = plain_skip
+                    job_track["current_step"] = f"Skipped: {plain_skip}"
+                    job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
+
                     app_entry = JobApplication(
                         platform=job.platform,
                         job_id_external=job.external_id,
@@ -271,16 +322,20 @@ async def _run_engine_flow(req: StartEngineRequest):
                         apply_url=job.apply_url,
                         job_description=job.description,
                         status="skipped",
-                        skip_reason=f"Match score {score} is below threshold {threshold}"
+                        skip_reason=plain_skip
                     )
                     db.add(app_entry)
-                    db.add(ActivityLog(message=f"Skipped {job.company} - score {score} < {threshold}"))
+                    db.add(ActivityLog(message=f"Skipped {job.company} - {plain_skip}"))
                     await db.commit()
                     continue
 
                 # Best resume selection
                 best_resume = JobMatcher.select_best_resume(job.title, match_result.get("matched_skills", []), resumes)
                 resume_file_path = best_resume.file_path if best_resume else None
+
+                job_track["status"] = "matched"
+                job_track["current_step"] = f"Matched (Score: {score}/100). Selected resume: {best_resume.file_name if best_resume else 'None'}"
+                job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
 
                 # Matched -> Create application record
                 app_entry = JobApplication(
@@ -301,15 +356,16 @@ async def _run_engine_flow(req: StartEngineRequest):
                 db.add(app_entry)
                 await db.commit()
                 await db.refresh(app_entry)
-                matched_jobs_to_run.append((app_entry, resume_file_path))
+                matched_jobs_to_run.append((app_entry, resume_file_path, job_track))
 
                 if len(matched_jobs_to_run) >= effective_limit:
                     break
 
             # Process matched applications step by step with live progress
             total_matched = len(matched_jobs_to_run)
-            for m_idx, (app_entry, resume_file_path) in enumerate(matched_jobs_to_run, 1):
+            for m_idx, (app_entry, resume_file_path, job_track) in enumerate(matched_jobs_to_run, 1):
                 if engine_state.stop_requested:
+                    job_track["current_step"] = "Stopped by user"
                     break
                 while engine_state.pause_requested:
                     engine_state.status = "Paused"
@@ -319,10 +375,15 @@ async def _run_engine_flow(req: StartEngineRequest):
                 engine_state.current_job_id = app_entry.id
                 engine_state.current_company = app_entry.company
                 engine_state.current_job_title = app_entry.title
-                engine_state.current_step = f"Opening listing {m_idx} of {total_matched}: {app_entry.company}..."
+                start_step = f"Opening listing {m_idx} of {total_matched}: {app_entry.company}..."
+                engine_state.current_step = start_step
+                job_track["status"] = "in_progress"
+                job_track["current_step"] = start_step
 
                 async def _update_step(msg: str):
                     engine_state.current_step = msg
+                    job_track["current_step"] = msg
+                    job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
 
                 try:
                     fill_res = await playwright_form_filler.fill_application(
@@ -333,6 +394,25 @@ async def _run_engine_flow(req: StartEngineRequest):
                         mode_override=effective_mode,
                         progress_callback=_update_step
                     )
+
+                    res_status = fill_res.get("status")
+                    if res_status == "dry_run_complete":
+                        job_track["status"] = "dry_run_complete"
+                        job_track["current_step"] = "DRY RUN complete: filled fields & screenshot captured (stopped before submit)"
+                    elif res_status == "review_pending":
+                        job_track["status"] = "review_pending"
+                        job_track["current_step"] = "REVIEW mode: paused awaiting human approval"
+                    elif res_status == "applied":
+                        job_track["status"] = "applied"
+                        job_track["current_step"] = "Successfully applied"
+                    elif res_status == "needs_you":
+                        job_track["status"] = "needs_you"
+                        job_track["current_step"] = f"Needs You: {fill_res.get('reason')}"
+                    elif res_status == "error":
+                        job_track["status"] = "failed"
+                        job_track["current_step"] = f"Failed: {fill_res.get('message')}"
+                    job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
+
                 except Exception as step_err:
                     logger.error(f"Step failed for {app_entry.company}: {step_err}", exc_info=True)
                     screenshot_path = str(settings.data_path / f"error_step_{app_entry.id}.png")
@@ -344,11 +424,13 @@ async def _run_engine_flow(req: StartEngineRequest):
 
                     err_msg = f"Step failed on {app_entry.company}: {str(step_err)}"
                     engine_state.current_step = err_msg
+                    job_track["status"] = "failed"
+                    job_track["current_step"] = err_msg
+                    job_track["updated_at"] = datetime.datetime.utcnow().isoformat()
                     app_entry.status = "failed"
                     app_entry.skip_reason = err_msg
                     db.add(ActivityLog(message=err_msg))
                     await db.commit()
-                    # Continue to next job instead of crashing
                     continue
 
         engine_state.status = "Stopped"

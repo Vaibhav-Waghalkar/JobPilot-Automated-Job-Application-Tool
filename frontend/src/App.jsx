@@ -17,8 +17,16 @@ export default function App() {
     current_step: null,
     stats: { found: 0, matched: 0, applied: 0, skipped: 0, needs_you: 0 },
     waiting_for_approval: [],
-    needs_you_questions: []
+    needs_you_questions: [],
+    test_run_jobs: []
   });
+
+  // Platforms login status
+  const [platformStatus, setPlatformStatus] = useState({
+    internshala: { logged_in: false, details: 'Checking session...' },
+    naukri: { logged_in: false, details: 'Checking session...' }
+  });
+  const [loginActionStatus, setLoginActionStatus] = useState({ internshala: null, naukri: null });
 
   // Settings / Preferences
   const [preferences, setPreferences] = useState({
@@ -69,11 +77,12 @@ export default function App() {
   const [needsYouAnswer, setNeedsYouAnswer] = useState({});
   const [countdownSeconds, setCountdownSeconds] = useState(300);
 
-  // Poll Engine Status, Missing Info, and Activity Logs
+  // Poll Engine Status, Missing Info, Activity Logs, and Platforms Login Status
   useEffect(() => {
     fetchAllData();
     const interval = setInterval(() => {
       fetchEngineStatus();
+      fetchPlatformStatus();
     }, 2500);
     return () => clearInterval(interval);
   }, []);
@@ -93,6 +102,7 @@ export default function App() {
   const fetchAllData = async () => {
     try {
       fetchEngineStatus();
+      fetchPlatformStatus();
       fetchProfileData();
       fetchJobs();
       fetchDocuments();
@@ -100,6 +110,18 @@ export default function App() {
       fetchActivityLogs();
     } catch (e) {
       console.error('Error fetching dashboard data:', e);
+    }
+  };
+
+  const fetchPlatformStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/workflow/platform-status`);
+      if (res.ok) {
+        const data = await res.json();
+        setPlatformStatus(data);
+      }
+    } catch (e) {
+      console.error('Failed to fetch platform status', e);
     }
   };
 
@@ -456,6 +478,97 @@ export default function App() {
     }
   };
 
+  // Open browser login in detached subprocess & detect login
+  const handleOpenLogin = async (platform) => {
+    setLoginActionStatus((prev) => ({
+      ...prev,
+      [platform]: `Launching browser for ${platform}...`
+    }));
+    try {
+      const res = await fetch(`${API_BASE}/workflow/browser/open-login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ platform })
+      });
+      const data = await res.json();
+      if (!res.ok || data.status === 'error') {
+        const errorDetail = data.detail || data.error || data.message || 'Failed to open browser';
+        setLoginActionStatus((prev) => ({
+          ...prev,
+          [platform]: `Error: ${errorDetail}`
+        }));
+        alert(`Failed to open ${platform} login browser:\n${errorDetail}`);
+      } else {
+        setLoginActionStatus((prev) => ({
+          ...prev,
+          [platform]: `Browser window opened. Please log in; status will update to "Logged in" automatically.`
+        }));
+        fetchPlatformStatus();
+      }
+    } catch (e) {
+      const errorMsg = e.message || String(e);
+      setLoginActionStatus((prev) => ({
+        ...prev,
+        [platform]: `Error: ${errorMsg}`
+      }));
+      alert(`Error connecting to server:\n${errorMsg}`);
+    }
+  };
+
+  // Format plain-language skip reasons for Jobs view
+  const formatPlainLanguageReason = (job) => {
+    if (job.status !== 'skipped') {
+      if (job.status === 'applied') return 'Applied successfully';
+      if (job.status === 'needs_you') return job.needs_you_reason || 'Requires user input';
+      if (job.status === 'matched') return `Matched (Score: ${job.match_score}/100)`;
+      return '-';
+    }
+
+    const raw = job.skip_reason || '';
+    const titleLower = (job.title || '').toLowerCase();
+
+    // 1. Non-tech role
+    if (raw.toLowerCase().includes('non-tech') || 
+        titleLower.includes('content') || 
+        titleLower.includes('graphic') || 
+        titleLower.includes('marketing') || 
+        titleLower.includes('sales')) {
+      return `Non-tech role (${job.title})`;
+    }
+
+    // 2. Empty profile / No verified facts
+    if (raw.includes('No verified') || raw.includes('Match score 0') || (job.match_score === 0)) {
+      return 'No verified facts in profile';
+    }
+
+    // 3. Salary below threshold
+    if (raw.toLowerCase().includes('salary') || raw.toLowerCase().includes('lpa')) {
+      return 'Salary below 5 LPA';
+    }
+
+    // 4. Stipend below threshold
+    if (raw.toLowerCase().includes('stipend')) {
+      return 'Stipend below ₹10,000/month';
+    }
+
+    // 5. Experience
+    if (raw.toLowerCase().includes('experience')) {
+      return 'Experience exceeds fresher cap (2.0 years)';
+    }
+
+    // 6. Blacklisted
+    if (raw.toLowerCase().includes('blacklist')) {
+      return `Blacklisted company (${job.company})`;
+    }
+
+    // 7. General score below threshold
+    if (raw.includes('below threshold')) {
+      return `Match score ${job.match_score || 0}/100 below threshold`;
+    }
+
+    return raw || 'Skipped by filters';
+  };
+
   const filteredJobs = jobs.filter((j) => {
     if (jobsFilter === 'all') return true;
     return j.status === jobsFilter;
@@ -533,6 +646,65 @@ export default function App() {
           <div>
             {/* Engine Panel */}
             <div className="panel">
+              {/* Engine Readiness Banner */}
+              {(() => {
+                const isInternshalaLoggedIn = platformStatus.internshala?.logged_in;
+                const verifiedFactsCount = vaultFacts.filter((f) => f.verified).length;
+                const hasResume = resumes.length > 0;
+                const isReady = isInternshalaLoggedIn && verifiedFactsCount > 0 && hasResume;
+
+                return (
+                  <div
+                    style={{
+                      marginBottom: '16px',
+                      padding: '12px 16px',
+                      background: isReady ? 'rgba(34, 197, 94, 0.08)' : 'rgba(234, 179, 8, 0.08)',
+                      borderLeft: isReady ? '4px solid var(--success)' : '4px solid var(--warning)',
+                      borderRadius: '4px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      gap: '12px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                      <span
+                        style={{
+                          width: '10px',
+                          height: '10px',
+                          borderRadius: '50%',
+                          background: isReady ? 'var(--success)' : 'var(--warning)',
+                          display: 'inline-block'
+                        }}
+                      />
+                      <div>
+                        <strong style={{ fontSize: '13px', color: 'var(--text-main)', marginRight: '8px' }}>
+                          {isReady ? 'Ready to apply' : 'Ready State: Action Required'}
+                        </strong>
+                        <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                          {isReady
+                            ? '• Internshala logged in • Verified facts loaded • Resume ready'
+                            : !isInternshalaLoggedIn
+                            ? '• Internshala not logged in (Log in via Settings > Platforms)'
+                            : verifiedFactsCount === 0
+                            ? '• No verified profile facts (Approve in Profile > Review imported data)'
+                            : '• No resumes uploaded (Add in Documents)'}
+                        </span>
+                      </div>
+                    </div>
+                    {!isInternshalaLoggedIn && (
+                      <button
+                        className="secondary"
+                        style={{ padding: '4px 10px', fontSize: '11px', whiteSpace: 'nowrap' }}
+                        onClick={() => setNavTab('settings')}
+                      >
+                        Go to Settings &gt; Platforms
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+
               <div className="engine-panel">
                 <div className="engine-control-row">
                   <div className="engine-buttons">
@@ -658,6 +830,136 @@ export default function App() {
                   {engineStatus.stats.needs_you}
                 </div>
               </div>
+            </div>
+
+            {/* Test Run Result Panel */}
+            <div className="panel">
+              <div className="panel-header">
+                <div>
+                  <span className="panel-title">Test run</span>
+                  <div className="panel-subtitle">
+                    Live job pipeline tracking each listing with its active step as it happens
+                  </div>
+                </div>
+                {engineStatus.status === 'Running' && (
+                  <span
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      fontSize: '12px',
+                      color: 'var(--primary)',
+                      fontWeight: 600
+                    }}
+                  >
+                    <span className="status-dot running" /> Live run active
+                  </span>
+                )}
+              </div>
+
+              {engineStatus.test_run_jobs && engineStatus.test_run_jobs.length > 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                  {engineStatus.test_run_jobs.map((tj, idx) => (
+                    <div
+                      key={idx}
+                      style={{
+                        padding: '12px 14px',
+                        background: 'var(--bg-surface-elevated)',
+                        borderRadius: '6px',
+                        borderLeft:
+                          tj.status === 'dry_run_complete' || tj.status === 'applied'
+                            ? '4px solid var(--success)'
+                            : tj.status === 'review_pending' || tj.status === 'needs_you'
+                            ? '4px solid var(--warning)'
+                            : tj.status === 'skipped'
+                            ? '4px solid var(--text-muted)'
+                            : '4px solid var(--primary)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '8px'
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <strong style={{ fontSize: '14px', marginRight: '8px' }}>
+                            {tj.company}
+                          </strong>
+                          <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                            — {tj.title}
+                          </span>
+                          {tj.salary && (
+                            <span style={{ marginLeft: '8px', fontSize: '12px', color: 'var(--text-muted)' }}>
+                              ({tj.salary})
+                            </span>
+                          )}
+                        </div>
+
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          {tj.score !== null && tj.score !== undefined && (
+                            <span
+                              style={{
+                                padding: '2px 8px',
+                                borderRadius: '4px',
+                                fontSize: '11px',
+                                fontWeight: 600,
+                                background: tj.score >= 70 ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                color: tj.score >= 70 ? 'var(--success)' : 'var(--danger)'
+                              }}
+                            >
+                              Score: {tj.score}/100
+                            </span>
+                          )}
+
+                          <span
+                            style={{
+                              padding: '2px 8px',
+                              borderRadius: '4px',
+                              fontSize: '11px',
+                              fontWeight: 600,
+                              background:
+                                tj.status === 'dry_run_complete' || tj.status === 'applied'
+                                  ? 'var(--success-soft)'
+                                  : tj.status === 'review_pending' || tj.status === 'needs_you'
+                                  ? 'var(--warning-soft)'
+                                  : 'var(--bg-surface)',
+                              color:
+                                tj.status === 'dry_run_complete' || tj.status === 'applied'
+                                  ? 'var(--success)'
+                                  : tj.status === 'review_pending' || tj.status === 'needs_you'
+                                  ? 'var(--warning)'
+                                  : tj.status === 'skipped'
+                                  ? 'var(--text-muted)'
+                                  : 'var(--primary)'
+                            }}
+                          >
+                            {tj.status.replace('_', ' ').toUpperCase()}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Current Step */}
+                      <div
+                        style={{
+                          fontSize: '12px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '6px 10px',
+                          background: 'var(--bg-surface)',
+                          borderRadius: '4px'
+                        }}
+                      >
+                        <span style={{ color: 'var(--text-muted)', fontWeight: 600 }}>Current step:</span>
+                        <span style={{ color: 'var(--text-main)' }}>{tj.current_step || 'In queue'}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div style={{ padding: '24px', textAlign: 'center', color: 'var(--text-muted)', fontSize: '13px' }}>
+                  No active test run. Click <strong>Start applying</strong> to launch evaluation; each job and its current step will appear here live.
+                </div>
+              )}
             </div>
 
             {/* Needs You Questions */}
@@ -918,26 +1220,7 @@ export default function App() {
                         </span>
                       </td>
                       <td style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-                        {(() => {
-                          if (job.skip_reason) return job.skip_reason;
-                          if (!job.match_reasons) return '-';
-                          let mr = job.match_reasons;
-                          if (typeof mr === 'string') {
-                            try { mr = JSON.parse(mr); } catch (e) { return mr; }
-                          }
-                          if (Array.isArray(mr)) return mr.slice(0, 3).join(', ');
-                          if (typeof mr === 'object' && mr !== null) {
-                            if (mr.analysis) return mr.analysis;
-                            if (Array.isArray(mr.matched_skills) && mr.matched_skills.length > 0) {
-                              return `Matched: ${mr.matched_skills.slice(0, 3).join(', ')}`;
-                            }
-                            if (Array.isArray(mr.gaps) && mr.gaps.length > 0) {
-                              return `Gaps: ${mr.gaps.slice(0, 2).join(', ')}`;
-                            }
-                            return 'Evaluated by matcher';
-                          }
-                          return String(mr);
-                        })()}
+                        {formatPlainLanguageReason(job)}
                       </td>
                     </tr>
                   ))}
@@ -1759,47 +2042,77 @@ export default function App() {
             {/* Platforms */}
             <div className="panel">
               <div className="panel-header">
-                <span className="panel-title">Platforms & Sessions</span>
-                <span className="panel-subtitle">Manual login in dedicated persistent browser profile</span>
+                <div>
+                  <span className="panel-title">Platforms & Sessions</span>
+                  <div className="panel-subtitle">Manual login in dedicated persistent browser profile (JobPilot never stores passwords)</div>
+                </div>
               </div>
               <div style={{ display: 'flex', gap: '16px' }}>
-                <div style={{ flex: 1, padding: '12px', background: 'var(--bg-surface-elevated)', borderRadius: '4px' }}>
-                  <strong>Internshala</strong>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 10px' }}>
-                    Persistent session saved locally in data/browser_profile.
+                {/* Internshala Card */}
+                <div style={{ flex: 1, padding: '16px', background: 'var(--bg-surface-elevated)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <strong style={{ fontSize: '15px' }}>Internshala</strong>
+                    <span
+                      style={{
+                        padding: '3px 8px',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        background: platformStatus.internshala?.logged_in ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                        color: platformStatus.internshala?.logged_in ? 'var(--success)' : 'var(--danger)',
+                        border: platformStatus.internshala?.logged_in ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)'
+                      }}
+                    >
+                      {platformStatus.internshala?.logged_in ? '● Logged in' : '○ Not logged in'}
+                    </span>
                   </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                    {platformStatus.internshala?.details || 'Persistent session saved locally in data/browser_profile.'}
+                  </div>
+                  {loginActionStatus.internshala && (
+                    <div style={{ fontSize: '12px', marginBottom: '10px', color: loginActionStatus.internshala.startsWith('Error') ? 'var(--danger)' : 'var(--primary)' }}>
+                      {loginActionStatus.internshala}
+                    </div>
+                  )}
                   <button
                     className="secondary"
-                    onClick={async () => {
-                      const res = await fetch(`${API_BASE}/workflow/browser/open-login`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ platform: 'internshala' })
-                      });
-                      const d = await res.json();
-                      alert(d.message || 'Browser opened');
-                    }}
+                    onClick={() => handleOpenLogin('internshala')}
                   >
-                    Open Internshala login
+                    {platformStatus.internshala?.logged_in ? 'Re-open Internshala session' : 'Open Internshala login'}
                   </button>
                 </div>
 
-                <div style={{ flex: 1, padding: '12px', background: 'var(--bg-surface-elevated)', borderRadius: '4px' }}>
-                  <strong>Naukri</strong>
-                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', margin: '4px 0 10px' }}>
-                    Login session saved locally.
+                {/* Naukri Card */}
+                <div style={{ flex: 1, padding: '16px', background: 'var(--bg-surface-elevated)', borderRadius: '6px', border: '1px solid var(--border)' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <strong style={{ fontSize: '15px' }}>Naukri</strong>
+                    <span
+                      style={{
+                        padding: '3px 8px',
+                        borderRadius: '12px',
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        background: platformStatus.naukri?.logged_in ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                        color: platformStatus.naukri?.logged_in ? 'var(--success)' : 'var(--danger)',
+                        border: platformStatus.naukri?.logged_in ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid rgba(239, 68, 68, 0.3)'
+                      }}
+                    >
+                      {platformStatus.naukri?.logged_in ? '● Logged in' : '○ Not logged in'}
+                    </span>
                   </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                    {platformStatus.naukri?.details || 'Login session saved locally.'}
+                  </div>
+                  {loginActionStatus.naukri && (
+                    <div style={{ fontSize: '12px', marginBottom: '10px', color: loginActionStatus.naukri.startsWith('Error') ? 'var(--danger)' : 'var(--primary)' }}>
+                      {loginActionStatus.naukri}
+                    </div>
+                  )}
                   <button
                     className="secondary"
-                    onClick={async () => {
-                      const res = await fetch(`${API_BASE}/workflow/browser/open-login?platform=naukri`, {
-                        method: 'POST'
-                      });
-                      const d = await res.json();
-                      alert(d.message || 'Browser opened');
-                    }}
+                    onClick={() => handleOpenLogin('naukri')}
                   >
-                    Open Naukri login
+                    {platformStatus.naukri?.logged_in ? 'Re-open Naukri session' : 'Open Naukri login'}
                   </button>
                 </div>
               </div>

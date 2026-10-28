@@ -46,30 +46,26 @@ class PlaywrightFormFiller:
     async def is_logged_in_to_internshala(self) -> bool:
         """Checks if active persistent browser context has saved Internshala session cookies."""
         try:
-            await self.initialize_browser()
-            cookies = await self.context.cookies(["https://internshala.com"])
-            # Internshala session cookies include user login tokens (e.g. PHPSESSID, in_user_id, etc.)
-            user_session_tokens = [c for c in cookies if c.get("name") in ["in_user_id", "user_id", "user_key", "in_session"]]
-            if user_session_tokens:
+            from backend.agents.platform_session import get_platform_status
+            status = get_platform_status("internshala")
+            if status.get("logged_in", False):
                 return True
-            # Secondary check: inspect any cookies on internshala domain
-            return any(c.get("name") in ["in_user_id", "user_id", "in_session"] for c in cookies)
+            if self.context:
+                cookies = await self.context.cookies(["https://internshala.com"])
+                user_session_tokens = [c for c in cookies if c.get("name") in ["in_user_id", "user_id", "user_key", "in_session", "PHPSESSID"]]
+                return len(user_session_tokens) > 0
+            return False
         except Exception as e:
             logger.warning(f"Error checking Internshala login: {e}")
             return False
 
-    async def open_manual_login_session(self, url: str = "https://internshala.com/login/user") -> Dict[str, Any]:
+    async def open_manual_login_session(self, url: Optional[str] = None, platform: str = "internshala") -> Dict[str, Any]:
         """
-        Opens persistent browser session for the user to log in manually once.
+        Opens persistent browser session in a separate subprocess for the user to log in manually once.
         JobPilot NEVER asks for or stores passwords.
         """
-        await self.initialize_browser()
-        page = await self.context.new_page()
-        await page.goto(url, timeout=45000)
-        return {
-            "status": "opened",
-            "message": "Persistent browser opened. Please log in manually. Your session cookies will be saved in your local browser profile."
-        }
+        from backend.agents.platform_session import launch_browser_login_subprocess
+        return launch_browser_login_subprocess(platform=platform, url=url)
 
     async def close(self):
         if self.context:

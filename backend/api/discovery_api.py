@@ -254,7 +254,12 @@ async def run_job_discovery(req: DiscoveryRequest, db: AsyncSession = Depends(ge
 
         score = match_result["score"]
         status = "matched" if score >= threshold else "skipped"
-        skip_r = None if score >= threshold else f"Match score {score} is below threshold {threshold}"
+        if score >= threshold:
+            skip_r = None
+        elif score == 0 and len([f for f in facts_rows if f.section in ["skill", "project"]]) == 0:
+            skip_r = "No verified facts in profile (Score: 0/100)"
+        else:
+            skip_r = f"Match score {score}/100 is below threshold {threshold}"
 
         # Auto-select best-fit resume
         best_resume = JobMatcher.select_best_resume(job.title, match_result["matched_skills"], resumes_rows)

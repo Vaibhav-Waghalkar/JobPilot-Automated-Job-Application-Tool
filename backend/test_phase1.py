@@ -1,5 +1,11 @@
-import asyncio
+import os
 import sys
+
+# Ensure tests run in an isolated test database
+os.environ["JOBPILOT_TEST_MODE"] = "1"
+os.environ["TEST_DATABASE_URL"] = "sqlite+aiosqlite:///./data/test_jobpilot.db"
+
+import asyncio
 import httpx
 from backend.vault.database import init_db, AsyncSessionLocal
 from backend.vault.importer import ProfileImporter

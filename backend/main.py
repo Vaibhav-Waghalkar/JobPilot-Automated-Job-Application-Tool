@@ -60,9 +60,10 @@ async def validation_exception_handler(request, exc):
 
 @app.exception_handler(Exception)
 async def generic_exception_handler(request, exc):
+    err_msg = str(exc) if str(exc) else f"{exc.__class__.__name__}: An unexpected error occurred"
     return JSONResponse(
         status_code=500,
-        content={"detail": str(exc), "status": "server_error"}
+        content={"detail": err_msg, "status": "server_error", "error_type": exc.__class__.__name__}
     )
 
 @app.get("/")

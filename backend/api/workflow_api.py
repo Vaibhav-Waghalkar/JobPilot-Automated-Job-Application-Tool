@@ -247,17 +247,41 @@ async def resolve_needs_you(
     background_tasks.add_task(_resume)
     return {"message": "Answer saved to verified vault. Application resumed."}
 
+class OpenLoginRequest(BaseModel):
+    platform: Optional[str] = "internshala"
+    url: Optional[str] = None
+
 @router.post("/browser/open-login")
-async def open_browser_for_login(url: Optional[str] = "https://internshala.com/login/user", platform: Optional[str] = "internshala"):
+async def open_browser_for_login(
+    req: Optional[OpenLoginRequest] = None,
+    platform: Optional[str] = None,
+    url: Optional[str] = None
+):
     """
-    Opens persistent browser context for the user to log in manually once (Internshala or Naukri).
-    JobPilot never asks for or stores user passwords.
+    Opens persistent browser context in a separate subprocess for manual login (Internshala or Naukri).
+    Works reliably on Windows with or without uvicorn --reload.
+    Returns JSON errors with real error details.
     """
-    target_url = url
-    if platform == "naukri":
-        target_url = "https://www.naukri.com/nlogin/login"
-    res = await playwright_form_filler.open_manual_login_session(target_url)
-    return res
+    chosen_platform = (req.platform if req and req.platform else platform) or "internshala"
+    chosen_url = (req.url if req and req.url else url)
+
+    try:
+        from backend.agents.platform_session import launch_browser_login_subprocess
+        res = launch_browser_login_subprocess(platform=chosen_platform, url=chosen_url)
+        if res.get("status") == "error":
+            raise HTTPException(status_code=500, detail=res.get("message", "Browser launch failed"))
+        return res
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to open login browser: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to open login browser: {str(e)}")
+
+@router.get("/platform-status")
+async def get_platforms_status_endpoint():
+    """Returns live login detection status for Internshala and Naukri."""
+    from backend.agents.platform_session import get_all_platforms_status
+    return get_all_platforms_status()
 
 @router.get("/naukri/profile-proposal")
 async def get_naukri_profile_proposal(db: AsyncSession = Depends(get_db)):

@@ -39,10 +39,19 @@ env/
 data/
 *.db
 *.sqlite3
-data/chroma_db/
+vault.db
+data/vault.db
+browser_profile/
 data/browser_profile/
+resumes/
 data/resumes/
+inbox/
+data/inbox/
+master_profile.json
+data/master_profile.json
+data/chroma_db/
 *.png
+screenshots/
 
 # Node / Frontend
 frontend/node_modules/
