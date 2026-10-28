@@ -32,6 +32,8 @@ class FixedProfile(Base):
     current_ctc = Column(String(100), nullable=True) # NULL until user inputs
     expected_ctc = Column(String(100), nullable=True) # NULL until user inputs
     total_experience_years = Column(Float, nullable=True)
+    employment_status = Column(String(100), default="not currently employed, internships only")
+    availability = Column(String(100), default="immediate")
     links = Column(JSON, default=dict) # {"github": "...", "linkedin": "...", "portfolio": "..."}
     languages = Column(JSON, default=list)
     updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
@@ -98,6 +100,8 @@ class JobPreference(Base):
     blacklisted_companies = Column(JSON, default=list)
     daily_caps = Column(JSON, default=dict) # {"internshala": 20, "career_page": 20}
     default_match_threshold = Column(Integer, default=70)
+    allow_undisclosed_salary = Column(Boolean, default=True)
+    max_experience_years = Column(Float, default=2.0)
     mode = Column(String(20), default="REVIEW") # DRY_RUN, REVIEW, AUTO
     auto_submit_platforms = Column(JSON, default=list) # e.g. ["internshala"]
     active_role_tag = Column(String(100), nullable=True) # Role + Resume run config
@@ -221,6 +225,8 @@ class ProjectTierItem(Base):
     has_docker = Column(Boolean, default=False)
     has_ci = Column(Boolean, default=False)
     is_author = Column(Boolean, default=True)
+    use_in_applications = Column(Boolean, default=True)
+    parent_project = Column(String(150), nullable=True) # e.g. for grouping ARIS-AI_Assistant under ARIS-Mark-II
     rubric_summary = Column(Text, nullable=True)
     user_confirmed = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)

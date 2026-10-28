@@ -80,27 +80,8 @@ async def analyze_missing_info(session: AsyncSession) -> Dict[str, Any]:
             "description": "No role-tagged resumes uploaded in Resume Library"
         })
 
-    # 4. Check Documents
-    stmt_docs = select(DocumentVault.doc_type).distinct()
-    res_docs = await session.execute(stmt_docs)
-    present_docs = set(res_docs.scalars().all())
-
-    if "id_proof" not in present_docs and "pan" not in present_docs and "aadhaar" not in present_docs:
-        missing_items.append({
-            "category": "Document Vault",
-            "field": "id_proof",
-            "label": "ID Proof",
-            "description": "Missing Government ID proof in Document Vault"
-        })
-
-    if "degree" not in present_docs and "10th_marksheet" not in present_docs and "12th_marksheet" not in present_docs:
-        missing_items.append({
-            "category": "Document Vault",
-            "field": "degree",
-            "label": "Degree / Academic Certificate",
-            "description": "Missing educational certificates in Document Vault"
-        })
-
+    # Optional documents (ID proof, degree) are requested only when a job requires them
+    # and do not block readiness for applications
     return {
         "missing_count": len(missing_items),
         "is_ready_for_application": len(missing_items) == 0,

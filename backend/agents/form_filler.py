@@ -43,6 +43,21 @@ class PlaywrightFormFiller:
                 args=["--disable-blink-features=AutomationControlled"]
             )
 
+    async def is_logged_in_to_internshala(self) -> bool:
+        """Checks if active persistent browser context has saved Internshala session cookies."""
+        try:
+            await self.initialize_browser()
+            cookies = await self.context.cookies(["https://internshala.com"])
+            # Internshala session cookies include user login tokens (e.g. PHPSESSID, in_user_id, etc.)
+            user_session_tokens = [c for c in cookies if c.get("name") in ["in_user_id", "user_id", "user_key", "in_session"]]
+            if user_session_tokens:
+                return True
+            # Secondary check: inspect any cookies on internshala domain
+            return any(c.get("name") in ["in_user_id", "user_id", "in_session"] for c in cookies)
+        except Exception as e:
+            logger.warning(f"Error checking Internshala login: {e}")
+            return False
+
     async def open_manual_login_session(self, url: str = "https://internshala.com/login/user") -> Dict[str, Any]:
         """
         Opens persistent browser session for the user to log in manually once.
@@ -86,7 +101,9 @@ class PlaywrightFormFiller:
         application_id: int,
         session: AsyncSession,
         override_resume_path: Optional[str] = None,
-        timeout_seconds: Optional[int] = None
+        timeout_seconds: Optional[int] = None,
+        mode_override: Optional[str] = None,
+        progress_callback: Optional[Any] = None
     ) -> Dict[str, Any]:
         """
         Executes application filling.
@@ -104,9 +121,9 @@ class PlaywrightFormFiller:
         prefs = prefs_res.scalars().first()
 
         # Enforce safe mode (Never auto-submit in first run unless explicitly configured)
-        configured_mode = (prefs.mode if prefs and prefs.mode else settings.APPLICATION_MODE).upper()
+        configured_mode = mode_override or (prefs.mode if prefs and prefs.mode else settings.APPLICATION_MODE).upper()
         if configured_mode not in ["DRY_RUN", "REVIEW", "AUTO"]:
-            configured_mode = "REVIEW"
+            configured_mode = "DRY_RUN"
         mode = configured_mode
 
         wait_timeout = timeout_seconds or settings.HUMAN_ALERT_TIMEOUT_SECONDS
@@ -148,16 +165,17 @@ class PlaywrightFormFiller:
                     await session.commit()
                     return {"status": "error", "message": f"Navigation failed: {net_err}"}
 
-            await self.human_delay(300, 600)
+            if progress_callback:
+                await progress_callback(f"Opening listing: {app_record.company} - {app_record.title}")
 
             # Check if login is required
             content = await page.content()
-            if "log in" in content.lower() and "sign up" in content.lower() and "password" in content.lower():
+            if "log in" in content.lower() and "sign up" in content.lower() and ("password" in content.lower() or "login/user" in page.url):
                 return await self._handle_blocker_flow(
                     page=page,
                     app_record=app_record,
                     reason="Login Required on Platform",
-                    question_text="Please log into your Internshala account in the browser.",
+                    question_text="Please log into your Internshala account in Settings > Platforms first.",
                     session=session,
                     wait_timeout=wait_timeout
                 )
@@ -176,6 +194,8 @@ class PlaywrightFormFiller:
                     btn = page.locator(apply_button_selector).first
                     if await btn.is_visible():
                         await self.log_activity("Clicking 'Apply now' on Internshala listing", session)
+                        if progress_callback:
+                            await progress_callback(f"Clicking Apply now for {app_record.company}")
                         await btn.click()
                         await self.human_delay(1500, 2500)
                 except Exception as e:
@@ -185,7 +205,10 @@ class PlaywrightFormFiller:
             max_pages = 10
 
             while page_number <= max_pages:
-                await self.log_activity(f"Processing Form Page {page_number} for {app_record.company}", session)
+                progress_msg = f"Filling page {page_number} for {app_record.company}"
+                await self.log_activity(progress_msg, session)
+                if progress_callback:
+                    await progress_callback(progress_msg)
                 await self.human_delay(600, 1200)
 
                 # Check for OTP or Captcha blocker
@@ -335,7 +358,10 @@ class PlaywrightFormFiller:
                         screenshot_path = str(settings.data_path / f"dry_run_{app_record.id}.png")
                         await page.screenshot(path=screenshot_path)
                         app_record.status = "matched"
-                        await self.log_activity(f"DRY RUN completed for {app_record.company}. Screenshot saved.", session)
+                        msg = f"DRY RUN completed for {app_record.company}. Screenshot saved (stopped before submit)."
+                        await self.log_activity(msg, session)
+                        if progress_callback:
+                            await progress_callback(msg)
                         await session.commit()
                         return {"status": "dry_run_complete", "screenshot": screenshot_path}
 
@@ -347,6 +373,10 @@ class PlaywrightFormFiller:
                         app_record.needs_you_question = "Approve final submission?"
                         app_record.needs_you_screenshot = screenshot_path
                         app_record.needs_you_timestamp = datetime.datetime.utcnow()
+                        msg = f"Waiting for your approval for {app_record.company}"
+                        await self.log_activity(msg, session)
+                        if progress_callback:
+                            await progress_callback(msg)
                         await session.commit()
                         return {"status": "review_pending", "message": "Paused for one-click approval"}
 

@@ -113,9 +113,18 @@ class InternshalaAdapter(BaseJobAdapter):
                     else:
                         # Scan all row-1-item divs for salary / stipend currency symbols
                         for r_item in card.select(".row-1-item"):
+                            # Prefer span.mobile or span.desktop to prevent concatenated duplicate spans
+                            child_span = r_item.select_one("span.mobile") or r_item.select_one("span.desktop")
+                            if child_span and any(sym in child_span.get_text() for sym in ["₹", "LPA", "/year", "/month", "Unpaid"]):
+                                salary_text = child_span.get_text(strip=True)
+                                break
                             txt = r_item.get_text(strip=True)
                             if any(sym in txt for sym in ["₹", "LPA", "/year", "/month", "Unpaid"]):
-                                salary_text = txt
+                                # Deduplicate repeated halves if .mobile and .desktop were concatenated
+                                if len(txt) > 10 and txt[:len(txt)//2].strip() == txt[len(txt)//2:].strip():
+                                    salary_text = txt[:len(txt)//2].strip()
+                                else:
+                                    salary_text = txt
                                 break
 
                     detail_link = ""

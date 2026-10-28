@@ -84,7 +84,7 @@ class GroundedAnswerEngine:
                 }
             if "total experience" in q_lower or "years of experience" in q_lower:
                 return {
-                    "answer": f"I have {profile.total_experience_years} years of professional software engineering experience [FIXED-PROFILE].",
+                    "answer": f"I have {profile.total_experience_years} years of professional experience, all completed across hands-on software engineering internships [FIXED-PROFILE].",
                     "status": "grounded",
                     "citations": ["FIXED-PROFILE"],
                     "attempts": 1

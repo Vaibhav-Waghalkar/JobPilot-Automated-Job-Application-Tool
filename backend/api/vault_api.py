@@ -50,6 +50,8 @@ class FixedProfileUpdate(BaseModel):
     current_ctc: Optional[str] = None
     expected_ctc: Optional[str] = None
     total_experience_years: Optional[float] = None
+    employment_status: Optional[str] = None
+    availability: Optional[str] = None
     links: Optional[Dict[str, str]] = None
     languages: Optional[List[str]] = None
 
@@ -69,6 +71,8 @@ class JobPreferencesUpdate(BaseModel):
     blacklisted_companies: Optional[List[str]] = None
     daily_caps: Optional[Dict[str, int]] = None
     default_match_threshold: Optional[int] = None
+    allow_undisclosed_salary: Optional[bool] = None
+    max_experience_years: Optional[float] = None
 
 class StagedItemDecision(BaseModel):
     action: str # "approve", "reject", "edit_and_approve"
@@ -81,7 +85,8 @@ class ConflictResolutionRequest(BaseModel):
     chosen_source: Optional[str] = "User typed/selected"
 
 class ProjectTierConfirmRequest(BaseModel):
-    tier: str # "Tier A", "Tier B", "Tier C"
+    tier: Optional[str] = None # "Tier A", "Tier B", "Tier C"
+    use_in_applications: Optional[bool] = None
 
 class ScrapeRequest(BaseModel):
     url: str
@@ -145,6 +150,8 @@ async def get_fixed_profile(db: AsyncSession = Depends(get_db)):
         "current_ctc": profile.current_ctc,
         "expected_ctc": profile.expected_ctc,
         "total_experience_years": profile.total_experience_years,
+        "employment_status": profile.employment_status,
+        "availability": profile.availability,
         "links": profile.links,
         "languages": profile.languages,
         "updated_at": profile.updated_at,
@@ -181,6 +188,8 @@ async def get_all_facts(section: Optional[str] = None, db: AsyncSession = Depend
             "title": f.title,
             "content": f.content,
             "metadata_json": f.metadata_json,
+            "verified": f.verified,
+            "source": f.source,
             "updated_at": f.updated_at,
         }
         for f in facts
@@ -201,10 +210,38 @@ async def update_fact(fact_id: str, payload: VaultFactUpdate, db: AsyncSession =
     if payload.metadata_json is not None:
         fact.metadata_json = payload.metadata_json
     fact.content_hash = compute_hash(payload.content)
+    fact.verified = True
+    fact.source = "edited by user"
 
-    upsert_vault_fact_embedding(fact.id, fact.content, {"section": fact.section, "title": fact.title})
+    try:
+        upsert_vault_fact_embedding(fact.id, fact.content, {"section": fact.section, "title": fact.title})
+    except Exception:
+        pass
     await db.commit()
-    return {"message": "Fact updated and re-indexed in ChromaDB", "id": fact.id}
+    return {"message": "Fact updated, verified, and re-indexed in ChromaDB", "id": fact.id, "verified": True}
+
+@router.post("/facts")
+async def create_fact(payload: VaultFactUpdate, db: AsyncSession = Depends(get_db)):
+    """Creates a new user fact directly in the vault as verified."""
+    fid = f"FACT-USR-{slugify(payload.title)[:30]}"
+    chash = compute_hash(payload.content)
+    fact = VaultFact(
+        id=fid,
+        section=payload.section or "skill",
+        title=payload.title,
+        content=payload.content,
+        metadata_json=payload.metadata_json or {},
+        content_hash=chash,
+        verified=True,
+        source="added by user"
+    )
+    db.add(fact)
+    try:
+        upsert_vault_fact_embedding(fid, payload.content, {"section": payload.section or "skill", "title": payload.title})
+    except Exception:
+        pass
+    await db.commit()
+    return {"status": "success", "message": "Fact created and verified in vault", "id": fid}
 
 @router.delete("/facts/{fact_id}")
 async def delete_fact(fact_id: str, db: AsyncSession = Depends(get_db)):
@@ -218,6 +255,41 @@ async def delete_fact(fact_id: str, db: AsyncSession = Depends(get_db)):
     delete_vault_fact_embedding(fact_id)
     await db.commit()
     return {"message": "Fact deleted from SQLite and ChromaDB", "id": fact_id}
+
+# --- Saved Answers (Learned Q&A) ---
+class SavedQAUpdate(BaseModel):
+    answer: str
+
+@router.get("/saved-answers")
+async def get_saved_answers(db: AsyncSession = Depends(get_db)):
+    from backend.vault.models import SavedQuestionAnswer
+    stmt = select(SavedQuestionAnswer).order_by(SavedQuestionAnswer.created_at.desc())
+    res = await db.execute(stmt)
+    return res.scalars().all()
+
+@router.put("/saved-answers/{qa_id}")
+async def update_saved_answer(qa_id: int, req: SavedQAUpdate, db: AsyncSession = Depends(get_db)):
+    from backend.vault.models import SavedQuestionAnswer
+    stmt = select(SavedQuestionAnswer).where(SavedQuestionAnswer.id == qa_id)
+    res = await db.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Saved answer not found")
+    item.answer = req.answer
+    await db.commit()
+    return {"status": "success", "message": "Saved answer updated", "id": qa_id, "answer": req.answer}
+
+@router.delete("/saved-answers/{qa_id}")
+async def delete_saved_answer(qa_id: int, db: AsyncSession = Depends(get_db)):
+    from backend.vault.models import SavedQuestionAnswer
+    stmt = select(SavedQuestionAnswer).where(SavedQuestionAnswer.id == qa_id)
+    res = await db.execute(stmt)
+    item = res.scalars().first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Saved answer not found")
+    await db.delete(item)
+    await db.commit()
+    return {"status": "success", "message": "Saved answer deleted", "id": qa_id}
 
 @router.get("/missing-info")
 async def get_missing_info(db: AsyncSession = Depends(get_db)):
@@ -371,15 +443,16 @@ async def decide_review_item(item_id: int, decision: StagedItemDecision, db: Asy
     if decision.action == "reject":
         item.status = "rejected"
         await db.commit()
-        return {"message": "Item rejected"}
+        return {"status": "success", "message": "Item rejected", "id": item_id}
 
     # Approve or edit_and_approve
     final_title = decision.edited_title or item.title
     final_content = decision.edited_content or item.proposed_content
     final_section = decision.edited_section or item.section
 
-    # Add as new vault fact or update existing
-    fid = f"FACT-IMP-{slugify(final_title)[:25]}"
+    # Add as new vault fact or update existing with clean slug ID
+    clean_slug = slugify(final_title)
+    fid = f"FACT-IMP-{clean_slug[:35]}"
     chash = compute_hash(final_content)
 
     stmt_fact = select(VaultFact).where(VaultFact.id == fid)
@@ -393,7 +466,9 @@ async def decide_review_item(item_id: int, decision: StagedItemDecision, db: Asy
             title=final_title,
             content=final_content,
             metadata_json={"source": item.source, "imported_from_staging": True},
-            content_hash=chash
+            content_hash=chash,
+            verified=True,
+            source="user_approved"
         )
         db.add(fact)
     else:
@@ -401,12 +476,65 @@ async def decide_review_item(item_id: int, decision: StagedItemDecision, db: Asy
         fact.content = final_content
         fact.section = final_section
         fact.content_hash = chash
+        fact.verified = True
+        fact.source = "user_approved"
 
-    upsert_vault_fact_embedding(fid, final_content, {"section": final_section, "title": final_title})
+    try:
+        upsert_vault_fact_embedding(fid, final_content, {"section": final_section, "title": final_title})
+    except Exception as emb_err:
+        pass # Allow DB commit even if vector embedding store is offline
+
     item.status = "approved" if decision.action == "approve" else "edited"
     await db.commit()
 
-    return {"message": f"Item approved and added to vault as {fid}"}
+    return {"status": "success", "message": f"Item approved and added to vault as {fid}", "fact_id": fid}
+
+@router.post("/import/review-items/bulk-approve")
+async def bulk_approve_review_items(db: AsyncSession = Depends(get_db)):
+    """Approves all pending staged review items into verified vault facts."""
+    stmt = select(ImportReviewItem).where(ImportReviewItem.status == "pending")
+    items = (await db.execute(stmt)).scalars().all()
+    approved_count = 0
+    for item in items:
+        fid = f"FACT-IMP-{slugify(item.title)[:35]}"
+        chash = compute_hash(item.proposed_content)
+        stmt_f = select(VaultFact).where(VaultFact.id == fid)
+        fact = (await db.execute(stmt_f)).scalars().first()
+        if not fact:
+            fact = VaultFact(
+                id=fid,
+                section=item.section,
+                title=item.title,
+                content=item.proposed_content,
+                metadata_json={"source": item.source, "imported_from_staging": True},
+                content_hash=chash,
+                verified=True,
+                source="user_bulk_approved"
+            )
+            db.add(fact)
+        else:
+            fact.verified = True
+        try:
+            upsert_vault_fact_embedding(fid, item.proposed_content, {"section": item.section, "title": item.title})
+        except Exception:
+            pass
+        item.status = "approved"
+        approved_count += 1
+
+    await db.commit()
+    return {"status": "success", "message": f"Approved {approved_count} items into verified vault facts", "count": approved_count}
+
+@router.post("/import/review-items/bulk-reject")
+async def bulk_reject_review_items(db: AsyncSession = Depends(get_db)):
+    """Rejects all pending staged review items."""
+    stmt = select(ImportReviewItem).where(ImportReviewItem.status == "pending")
+    items = (await db.execute(stmt)).scalars().all()
+    rejected_count = 0
+    for item in items:
+        item.status = "rejected"
+        rejected_count += 1
+    await db.commit()
+    return {"status": "success", "message": f"Rejected {rejected_count} items", "count": rejected_count}
 
 @router.post("/import/linkedin-zip")
 async def import_linkedin_data(file: UploadFile = File(...), db: AsyncSession = Depends(get_db)):
@@ -507,14 +635,17 @@ async def get_project_tiers(db: AsyncSession = Depends(get_db)):
 
 @router.post("/project-tiers/{project_id}/confirm")
 async def confirm_project_tier(project_id: int, req: ProjectTierConfirmRequest, db: AsyncSession = Depends(get_db)):
-    """User confirms or adjusts project tier."""
+    """User confirms or adjusts project tier and usage in applications."""
     stmt = select(ProjectTierItem).where(ProjectTierItem.id == project_id)
     res = await db.execute(stmt)
     item = res.scalars().first()
     if not item:
         raise HTTPException(status_code=404, detail="Project item not found")
 
-    item.tier = req.tier
+    if req.tier:
+        item.tier = req.tier
+    if req.use_in_applications is not None:
+        item.use_in_applications = req.use_in_applications
     item.user_confirmed = True
     await db.commit()
-    return {"status": "confirmed", "id": project_id, "tier": req.tier}
+    return {"status": "confirmed", "id": project_id, "tier": item.tier, "use_in_applications": item.use_in_applications}

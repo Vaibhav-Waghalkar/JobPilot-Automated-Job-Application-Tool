@@ -64,7 +64,7 @@ async def test_live_listing(req: TestLiveListingRequest, db: AsyncSession = Depe
     prefs_res = await db.execute(stmt_prefs)
     prefs = prefs_res.scalars().first()
 
-    stmt_apps = select(JobApplication.apply_url)
+    stmt_apps = select(JobApplication.apply_url).where(JobApplication.status == "applied")
     apps_res = await db.execute(stmt_apps)
     applied_urls = set(apps_res.scalars().all())
 
@@ -149,7 +149,7 @@ async def run_job_discovery(req: DiscoveryRequest, db: AsyncSession = Depends(ge
     prefs_res = await db.execute(stmt_prefs)
     prefs = prefs_res.scalars().first()
 
-    stmt_apps = select(JobApplication.apply_url)
+    stmt_apps = select(JobApplication.apply_url).where(JobApplication.status == "applied")
     apps_res = await db.execute(stmt_apps)
     applied_urls = set(apps_res.scalars().all())
 

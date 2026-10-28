@@ -33,7 +33,16 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
             "raw": ""
         }
 
-    text = salary_text.lower().replace(",", "").strip()
+    # Normalize Indian digit grouping and clean text
+    # E.g. "1,50,000 - 2,20,000" or "1,50,00,000" if erroneously formatted
+    # Check if string has repeated tokens (e.g. "1,50,000 - 2,20,000 1,50,000 - 2,20,000 /year")
+    cleaned_input = salary_text.strip()
+    # Deduplicate repeated half if present
+    half = len(cleaned_input) // 2
+    if len(cleaned_input) > 10 and cleaned_input[:half].strip() == cleaned_input[half:].strip():
+        cleaned_input = cleaned_input[:half].strip()
+
+    text = cleaned_input.lower().strip()
 
     # Check for unpaid indicators
     unpaid_keywords = ["unpaid", "un-paid", "0 stipend", "stipend: 0", "free internship", "no stipend"]
@@ -41,6 +50,8 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
         return {
             "is_undisclosed": False,
             "is_unpaid": True,
+            "min_val": 0.0,
+            "max_val": 0.0,
             "annual_val": 0.0,
             "monthly_val": 0.0,
             "lower_bound_annual": 0.0,
@@ -57,21 +68,29 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
         return {
             "is_undisclosed": True,
             "is_unpaid": False,
+            "min_val": None,
+            "max_val": None,
             "annual_val": None,
             "monthly_val": None,
             "lower_bound_annual": None,
             "raw": salary_text
         }
 
+    # Helper function to parse Indian formatted numbers with commas (e.g. 1,50,000 or 15000)
+    def parse_inr_num(s: str) -> float:
+        cleaned = s.replace(",", "").strip()
+        return float(cleaned)
+
     # Case 1: LPA format e.g. "5-8 LPA", "6 LPA", "4.5 - 7.5 Lakhs", "5 to 8 LPA"
     lpa_range = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*(?:lpa|lac|lacs|lakh|lakhs)", text)
     if lpa_range:
         low = float(lpa_range.group(1)) * 100000
         high = float(lpa_range.group(2)) * 100000
-        # If upper bound meets requirement, we accept (pass if upper bound meets minimum)
         return {
             "is_undisclosed": False,
             "is_unpaid": False,
+            "min_val": low,
+            "max_val": high,
             "annual_val": high,
             "monthly_val": high / 12.0,
             "lower_bound_annual": low,
@@ -84,27 +103,29 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
         return {
             "is_undisclosed": False,
             "is_unpaid": False,
+            "min_val": val,
+            "max_val": val,
             "annual_val": val,
             "monthly_val": val / 12.0,
             "lower_bound_annual": val,
             "raw": salary_text
         }
 
+    # Extract all comma-grouped or continuous numbers
+    # E.g. "1,50,000" or "10,000" or "500000"
+    num_matches = [m.group(0) for m in re.finditer(r"\d+(?:,\d+)*(?:\.\d+)?", text)]
+    nums = [parse_inr_num(m) for m in num_matches]
+
     # Case 2: Monthly format e.g. "10000-15000 /month", "15000 / month", "10,000 /month"
     if "month" in text or "pm" in text or "/mo" in text:
-        nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
         if nums:
-            # If multiple numbers (e.g. range 10000 - 15000)
-            if len(nums) >= 2 and nums[0] < nums[1]:
-                low_m = nums[0]
-                high_m = nums[1]
-            else:
-                low_m = nums[0]
-                high_m = nums[0]
-
+            low_m = nums[0]
+            high_m = nums[1] if len(nums) >= 2 and nums[0] < nums[1] else nums[0]
             return {
                 "is_undisclosed": False,
                 "is_unpaid": (high_m == 0),
+                "min_val": low_m,
+                "max_val": high_m,
                 "annual_val": high_m * 12.0,
                 "monthly_val": high_m,
                 "lower_bound_annual": low_m * 12.0,
@@ -112,21 +133,19 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
             }
 
     # Case 3: Direct yearly format or absolute numbers
-    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
     if nums:
-        # Determine if values are monthly scale or annual scale
-        # If largest value is > 50000, likely annual INR. If < 50000 and job_type is internship, likely monthly.
-        if len(nums) >= 2 and nums[0] < nums[1]:
-            low = nums[0]
-            high = nums[1]
-        else:
-            low = nums[0]
-            high = nums[0]
+        low = nums[0]
+        high = nums[1] if len(nums) >= 2 and nums[0] < nums[1] else nums[0]
 
-        if high >= 50000 or "year" in text or "annum" in text or "/yr" in text or "pa" in text:
+        is_yearly = ("year" in text or "annum" in text or "/yr" in text or "pa" in text)
+        is_large = (high >= 50000)
+
+        if is_yearly or (is_large and job_type != "internship"):
             return {
                 "is_undisclosed": False,
                 "is_unpaid": False,
+                "min_val": low,
+                "max_val": high,
                 "annual_val": high,
                 "monthly_val": high / 12.0,
                 "lower_bound_annual": low,
@@ -137,6 +156,8 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
             return {
                 "is_undisclosed": False,
                 "is_unpaid": (high == 0),
+                "min_val": low,
+                "max_val": high,
                 "annual_val": high * 12.0,
                 "monthly_val": high,
                 "lower_bound_annual": low * 12.0,
@@ -147,6 +168,8 @@ def parse_salary_and_stipend(salary_text: Optional[str], job_type: str = "job") 
     return {
         "is_undisclosed": True,
         "is_unpaid": False,
+        "min_val": None,
+        "max_val": None,
         "annual_val": None,
         "monthly_val": None,
         "lower_bound_annual": None,
@@ -208,12 +231,31 @@ def apply_hard_filters(
         if b and b in job.company.lower():
             return False, f"Company '{job.company}' is in blacklist"
 
-    # 3. Target roles filter
+    # 3. Target roles filter: skip non-tech roles before any LLM call
+    NON_TECH_KEYWORDS = [
+        "content", "graphic", "business development", "marketing", "sales", "hr",
+        "telecaller", "operations", "recruiter", "academic counselor", "social media",
+        "teacher", "faculty", "curriculum", "copywriter", "seo specialist", "bpo", "voice process"
+    ]
+    title_lower = job.title.lower()
+    for ntk in NON_TECH_KEYWORDS:
+        if re.search(r"\b" + re.escape(ntk) + r"\b", title_lower):
+            return False, f"Job title '{job.title}' is a non-tech role ({ntk})"
+
     target_roles = [r.lower().strip() for r in (prefs.target_roles or [])]
     if target_roles:
-        title_lower = job.title.lower()
-        # Direct phrase or word matches
-        matches_role = any(r in title_lower or any(w in title_lower for w in r.split() if len(w) > 3) for r in target_roles)
+        # Match if target role phrase is present, or candidate title matches common software roles
+        matches_role = False
+        for r in target_roles:
+            if r in title_lower:
+                matches_role = True
+                break
+            # Check key software terms if target role contains developer/engineer
+            if any(term in r for term in ["developer", "engineer", "programmer"]):
+                if any(tech_term in title_lower for tech_term in ["software engineer", "software developer", "backend", "full stack", "fullstack", "python developer", "python engineer", "web developer"]):
+                    matches_role = True
+                    break
+
         if not matches_role:
             return False, f"Job title '{job.title}' does not match target roles ({', '.join(target_roles[:3])})"
 
